@@ -3,11 +3,13 @@ import json
 import hashlib
 import numpy as np
 import faiss
-import gradio as gr
-from typing import List, Dict, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
 from PyPDF2 import PdfReader
 import re
+from fastapi import FastAPI, UploadFile
+from fastapi.responses import JSONResponse
+import uvicorn
+from typing import List, Dict, Any, Optional, Tuple
 
 # -------------------------
 # Config
@@ -19,7 +21,6 @@ DEFAULT_NLIST = 128
 DEFAULT_NPROBE = 8
 IVF_THRESHOLD = 500
 SUMMARY_SENTENCES = 5
-
 
 # -------------------------
 # Helpers
@@ -46,10 +47,6 @@ def split_sentences(text: str) -> List[str]:
 def batch_encode(model, sentences: List[str]) -> np.ndarray:
     return model.encode(sentences, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
 
-
-# -------------------------
-# Metadata utilities
-# -------------------------
 def save_meta(meta_path: str, sentences: List[str], ids: List[int], config: Dict[str, Any]):
     atomic_write_json(meta_path, {"sentences": sentences, "ids": ids, "config": config})
 
@@ -64,10 +61,6 @@ def stable_doc_id(name: str) -> str:
     h = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
     return f"{base}-{h}"
 
-
-# -------------------------
-# Index utilities
-# -------------------------
 def _maybe_to_gpu(index: faiss.Index) -> faiss.Index:
     if USE_GPU:
         try:
@@ -96,7 +89,6 @@ def save_index(index: faiss.Index, path: str):
 
 def load_index(path: str) -> Optional[faiss.Index]:
     return faiss.read_index(path) if os.path.exists(path) else None
-
 
 # -------------------------
 # Analyzer
@@ -163,20 +155,35 @@ class EfficientPDFAnalyzer:
         _, I = tmp.search(centroid, min(num_sentences, len(sentences)))
         return " ".join(sentences[int(i)] for i in I[0])
 
-    def generate_answer(self, question: str, doc_id: str, top_k: int = 3, use_generator: bool = False) -> str:
-        retrieved = self.search(question, doc_id, top_k=top_k)
-        if not retrieved: return "No relevant passages found."
-        context = "\n\n".join([r[2] for r in retrieved])
-        return f"[GENERATIVE ANSWER PLACEHOLDER]\n\nContext:\n{context}" if use_generator else context
-
-
 # -------------------------
-# Gradio UI
+# FastAPI App
 # -------------------------
 analyzer = EfficientPDFAnalyzer()
+app = FastAPI(title="Advanced PDF Analyzer API")
 
-def ui_load_pdf(file_obj):
-    if file_obj is None: return "❌ Please upload a PDF", ""
+@app.post("/index")
+async def index_pdf(file: UploadFile):
     try:
-        meta = analyzer.index_pdf(file_obj, reindex=False)
-        return f"✅ {meta['status'].capitalize()}. {meta['count']} sentences indexed. Index type: {meta.get('index_type
+        meta = analyzer.index_pdf(file.file, reindex=False)
+        return JSONResponse(content=meta)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+
+@app.get("/search")
+async def search(query: str, doc_id: str, top_k: int = 3):
+    try:
+        results = analyzer.search(query, doc_id, top_k=top_k)
+        return JSONResponse(content={"results": results})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+
+@app.get("/summary")
+async def summary(doc_id: str, num_sentences: int = SUMMARY_SENTENCES):
+    try:
+        text = analyzer.extractive_summary(doc_id, num_sentences=num_sentences)
+        return JSONResponse(content={"summary": text})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+
+if __name__ == "__main__":
+    uvicorn
