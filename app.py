@@ -6,9 +6,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from PyPDF2 import PdfReader
 import re
-from fastapi import FastAPI, UploadFile
-from fastapi.responses import JSONResponse
-import uvicorn
+import streamlit as st
 from typing import List, Dict, Any, Optional, Tuple
 
 # -------------------------
@@ -38,7 +36,7 @@ def meta_paths(doc_id: str, store_dir: str):
     return os.path.join(store_dir, f"{doc_id}.meta.json"), os.path.join(store_dir, f"{doc_id}.index")
 
 def read_pdf_text(pdf_source) -> str:
-    reader = PdfReader(pdf_source if isinstance(pdf_source, str) else pdf_source)
+    reader = PdfReader(pdf_source)
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 def split_sentences(text: str) -> List[str]:
@@ -100,7 +98,7 @@ class EfficientPDFAnalyzer:
         ensure_dir(self.store_dir)
 
     def index_pdf(self, pdf_source, doc_id: Optional[str] = None, reindex: bool = False) -> dict:
-        inferred_id = stable_doc_id(getattr(pdf_source, "name", pdf_source)) if isinstance(pdf_source, (str, type(""))) else "uploaded-pdf"
+        inferred_id = stable_doc_id(getattr(pdf_source, "name", "uploaded.pdf"))
         doc_id = doc_id or inferred_id
         meta_path, idx_path = meta_paths(doc_id, self.store_dir)
 
@@ -156,34 +154,36 @@ class EfficientPDFAnalyzer:
         return " ".join(sentences[int(i)] for i in I[0])
 
 # -------------------------
-# FastAPI App
+# Streamlit App
 # -------------------------
+st.title("📄 Advanced PDF Analyzer")
+
 analyzer = EfficientPDFAnalyzer()
-app = FastAPI(title="Advanced PDF Analyzer API")
 
-@app.post("/index")
-async def index_pdf(file: UploadFile):
+uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+if uploaded_file is not None:
     try:
-        meta = analyzer.index_pdf(file.file, reindex=False)
-        return JSONResponse(content=meta)
+        meta = analyzer.index_pdf(uploaded_file)
+        st.success(f"Indexed {meta['count']} sentences from {uploaded_file.name} (Index type: {meta['index_type']})")
+        st.session_state["doc_id"] = meta["doc_id"]
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=400)
+        st.error(f"Error indexing PDF: {e}")
 
-@app.get("/search")
-async def search(query: str, doc_id: str, top_k: int = 3):
-    try:
-        results = analyzer.search(query, doc_id, top_k=top_k)
-        return JSONResponse(content={"results": results})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=400)
+if "doc_id" in st.session_state:
+    query = st.text_input("Enter search query")
+    if st.button("Search"):
+        try:
+            results = analyzer.search(query, st.session_state["doc_id"], top_k=5)
+            st.write("### 🔍 Search Results")
+            for idx, score, sentence in results:
+                st.write(f"- **Score:** {score:.4f} | **Sentence:** {sentence}")
+        except Exception as e:
+            st.error(f"Error during search: {e}")
 
-@app.get("/summary")
-async def summary(doc_id: str, num_sentences: int = SUMMARY_SENTENCES):
-    try:
-        text = analyzer.extractive_summary(doc_id, num_sentences=num_sentences)
-        return JSONResponse(content={"summary": text})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=400)
-
-if __name__ == "__main__":
-    uvicorn
+    if st.button("Generate Summary"):
+        try:
+            summary_text = analyzer.extractive_summary(st.session_state["doc_id"], num_sentences=SUMMARY_SENTENCES)
+            st.write("### 📌 Extractive Summary")
+            st.write(summary_text)
+        except Exception as e:
+            st.error(f"Error generating summary: {e}")
